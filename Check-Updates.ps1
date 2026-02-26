@@ -25,7 +25,10 @@
 
 .NOTES
     Must be run as Administrator.
+    Compatible with PowerShell 5.1 and later.
     Requires Windows 10 / Server 2016 or later.
+    Chocolatey and winget checks are performed automatically if those tools
+    are installed; no extra parameters are required.
 #>
 
 #Requires -RunAsAdministrator
@@ -61,15 +64,16 @@ function Get-WindowsUpdates {
         $result    = $searcher.Search('IsInstalled=0 and Type=''Software'' and IsHidden=0')
 
         foreach ($update in $result.Updates) {
+            $severity = if ($update.MsrcSeverity) { $update.MsrcSeverity } else { 'Unrated' }
             $updates += [PSCustomObject]@{
                 Source      = 'WindowsUpdate'
                 Name        = $update.Title
                 KB          = ($update.KBArticleIDs -join ', ')
-                Severity    = $update.MsrcSeverity
+                Severity    = $severity
                 Size        = [math]::Round($update.MaxDownloadSize / 1MB, 2)
                 RebootRequired = $update.InstallationBehavior.RebootBehavior -ne 0
             }
-            Write-Host ("  [{0}] {1}" -f ($update.MsrcSeverity ?? 'Unrated'), $update.Title)
+            Write-Host ("  [{0}] {1}" -f $severity, $update.Title)
         }
     }
     catch {
@@ -135,7 +139,51 @@ function Get-WingetUpdates {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Driver updates (via Windows Update COM, software type = Driver)
+# 3. Installed packages via Chocolatey
+# ---------------------------------------------------------------------------
+function Get-ChocolateyUpdates {
+    Write-Section 'Chocolatey package updates'
+
+    $updates = @()
+
+    $choco = Get-Command choco -ErrorAction SilentlyContinue
+    if (-not $choco) {
+        Write-Warning 'choco not found. Skipping Chocolatey update check.'
+        return $updates
+    }
+
+    try {
+        # 'choco outdated' lists packages with available upgrades
+        # Output format (pipe-delimited): name|currentVersion|availableVersion|pinned
+        $raw = & choco outdated --no-color --limit-output 2>&1
+
+        foreach ($line in $raw) {
+            if ($line -match '^(?<name>[^|]+)\|(?<current>[^|]+)\|(?<available>[^|]+)\|(?<pinned>[^|]*)') {
+                $updates += [PSCustomObject]@{
+                    Source           = 'Chocolatey'
+                    Name             = $Matches['name'].Trim()
+                    CurrentVersion   = $Matches['current'].Trim()
+                    AvailableVersion = $Matches['available'].Trim()
+                    Pinned           = $Matches['pinned'].Trim() -eq 'true'
+                    RebootRequired   = $false
+                }
+                Write-Host ("  {0}  {1} -> {2}" -f $Matches['name'].Trim(), $Matches['current'].Trim(), $Matches['available'].Trim())
+            }
+        }
+    }
+    catch {
+        Write-Warning "Chocolatey update check failed: $_"
+    }
+
+    if ($updates.Count -eq 0) {
+        Write-Host '  No Chocolatey updates found.' -ForegroundColor Green
+    }
+
+    return $updates
+}
+
+# ---------------------------------------------------------------------------
+# 4. Driver updates (via Windows Update COM, type = Driver)
 # ---------------------------------------------------------------------------
 function Get-DriverUpdates {
     Write-Section 'Driver updates'
@@ -148,10 +196,11 @@ function Get-DriverUpdates {
         $result   = $searcher.Search('IsInstalled=0 and Type=''Driver'' and IsHidden=0')
 
         foreach ($update in $result.Updates) {
+            $driverClass = try { $update.DriverClass } catch { $null }
             $updates += [PSCustomObject]@{
                 Source         = 'DriverUpdate'
                 Name           = $update.Title
-                DriverClass    = ($update.DriverClass ?? 'Unknown')
+                DriverClass    = if ($driverClass) { $driverClass } else { 'Unknown' }
                 RebootRequired = $update.InstallationBehavior.RebootBehavior -ne 0
             }
             Write-Host ("  {0}" -f $update.Title)
@@ -172,16 +221,19 @@ function Get-DriverUpdates {
 # Main
 # ---------------------------------------------------------------------------
 $report = [ordered]@{
-    GeneratedAt    = (Get-Date -Format 'o')
-    ComputerName   = $env:COMPUTERNAME
-    WindowsUpdates = @()
-    WingetUpdates  = @()
-    DriverUpdates  = @()
+    GeneratedAt        = (Get-Date -Format 'o')
+    ComputerName       = $env:COMPUTERNAME
+    WindowsUpdates     = @()
+    WingetUpdates      = @()
+    ChocolateyUpdates  = @()
+    DriverUpdates      = @()
 }
 
-$report.WindowsUpdates = Get-WindowsUpdates
+$report.WindowsUpdates    = Get-WindowsUpdates
 
-$report.WingetUpdates  = Get-WingetUpdates
+$report.WingetUpdates     = Get-WingetUpdates
+
+$report.ChocolateyUpdates = Get-ChocolateyUpdates
 
 if ($IncludeDrivers) {
     $report.DriverUpdates = Get-DriverUpdates
@@ -191,11 +243,13 @@ if ($IncludeDrivers) {
 # Summary
 # ---------------------------------------------------------------------------
 Write-Section 'Summary'
-$totalUpdates = $report.WindowsUpdates.Count + $report.WingetUpdates.Count + $report.DriverUpdates.Count
-Write-Host ("  Windows Updates : {0}" -f $report.WindowsUpdates.Count)
-Write-Host ("  Winget Updates  : {0}" -f $report.WingetUpdates.Count)
-Write-Host ("  Driver Updates  : {0}" -f $report.DriverUpdates.Count)
-Write-Host ("  TOTAL           : {0}" -f $totalUpdates) -ForegroundColor Yellow
+$totalUpdates = $report.WindowsUpdates.Count + $report.WingetUpdates.Count +
+                $report.ChocolateyUpdates.Count + $report.DriverUpdates.Count
+Write-Host ("  Windows Updates    : {0}" -f $report.WindowsUpdates.Count)
+Write-Host ("  Winget Updates     : {0}" -f $report.WingetUpdates.Count)
+Write-Host ("  Chocolatey Updates : {0}" -f $report.ChocolateyUpdates.Count)
+Write-Host ("  Driver Updates     : {0}" -f $report.DriverUpdates.Count)
+Write-Host ("  TOTAL              : {0}" -f $totalUpdates) -ForegroundColor Yellow
 
 $rebootNeeded = ($report.WindowsUpdates + $report.DriverUpdates | Where-Object { $_.RebootRequired }) -ne $null
 if ($rebootNeeded) {

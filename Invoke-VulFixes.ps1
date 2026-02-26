@@ -36,6 +36,9 @@
 .PARAMETER SkipApply
     Run detection only (Check-Updates.ps1) without installing anything.
 
+.PARAMETER SkipChocolatey
+    Skip Chocolatey package upgrades even if choco is installed.
+
 .PARAMETER MaxDaysWithoutReboot
     Passed through to Enforce-Reboot.ps1. Defaults to 14.
 
@@ -70,6 +73,7 @@ param(
     [string]$ReportPath = "$env:ProgramData\VulFixes\UpdateReport.json",
     [switch]$IncludeDrivers,
     [switch]$SkipApply,
+    [switch]$SkipChocolatey,
 
     [ValidateRange(1, 365)]
     [int]$MaxDaysWithoutReboot = 14,
@@ -132,8 +136,9 @@ else {
         ReportPath       = $ReportPath
         NotifyScriptPath = $notifyScript
     }
-    if ($IncludeDrivers) { $applyParams['IncludeDrivers'] = $true }
-    if ($WhatIfPreference) { $applyParams['WhatIf'] = $true }
+    if ($IncludeDrivers)   { $applyParams['IncludeDrivers']   = $true }
+    if ($SkipChocolatey)   { $applyParams['SkipChocolatey']   = $true }
+    if ($WhatIfPreference) { $applyParams['WhatIf']           = $true }
 
     & $applyScript @applyParams
 }

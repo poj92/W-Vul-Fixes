@@ -23,6 +23,9 @@
 .PARAMETER SkipWinget
     When specified, skips winget package upgrades.
 
+.PARAMETER SkipChocolatey
+    When specified, skips Chocolatey package upgrades.
+
 .PARAMETER NotifyScriptPath
     Path to Notify-User.ps1 used to alert logged-in users after updates.
     Defaults to the same directory as this script.
@@ -33,8 +36,12 @@
 
 .NOTES
     Must be run as Administrator.
+    Compatible with PowerShell 5.1 and later.
     Requires Windows 10 / Server 2016 or later.
     A reboot may be required after running this script.
+    Key events (start, finish, errors) are written to the Windows Application
+    Event Log under the source "VulFixes" when the source has been registered
+    (done automatically by Deploy-VulFixes.ps1).
 #>
 
 #Requires -RunAsAdministrator
@@ -44,6 +51,7 @@ param(
     [string]$ReportPath = "$env:ProgramData\VulFixes\UpdateReport.json",
     [switch]$IncludeDrivers,
     [switch]$SkipWinget,
+    [switch]$SkipChocolatey,
     [string]$NotifyScriptPath = (Join-Path $PSScriptRoot 'Notify-User.ps1')
 )
 
@@ -73,6 +81,27 @@ function Initialize-LogDir {
     $dir = Split-Path $LogPath -Parent
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Helper: Write to Windows Application Event Log (for RMM integration)
+# ---------------------------------------------------------------------------
+function Write-EventLogEntry {
+    param(
+        [string]$Message,
+        [System.Diagnostics.EventLogEntryType]$EntryType = 'Information',
+        [int]$EventId = 1000
+    )
+    $source = 'VulFixes'
+    try {
+        if ([System.Diagnostics.EventLog]::SourceExists($source)) {
+            Write-EventLog -LogName Application -Source $source `
+                -EntryType $EntryType -EventId $EventId -Message $Message
+        }
+    }
+    catch {
+        # Non-fatal: event log writing is best-effort
     }
 }
 
@@ -146,7 +175,29 @@ function Install-WingetUpdates {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Install driver updates
+# 3. Upgrade packages via Chocolatey
+# ---------------------------------------------------------------------------
+function Install-ChocolateyUpdates {
+    Write-Log 'Starting Chocolatey package upgrades...'
+
+    $choco = Get-Command choco -ErrorAction SilentlyContinue
+    if (-not $choco) {
+        Write-Log 'choco not found – skipping.' 'WARN'
+        return
+    }
+
+    try {
+        $output = & choco upgrade all --yes --no-progress 2>&1
+        $output | ForEach-Object { Write-Log "  [choco] $_" }
+        Write-Log 'Chocolatey upgrades complete.'
+    }
+    catch {
+        Write-Log "Chocolatey upgrade failed: $_" 'WARN'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 4. Install driver updates
 # ---------------------------------------------------------------------------
 function Install-DriverUpdates {
     Write-Log 'Starting driver update installation...'
@@ -189,7 +240,7 @@ function Install-DriverUpdates {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Check whether a reboot is already pending (from previous ops)
+# 5. Check whether a reboot is already pending (from previous ops)
 # ---------------------------------------------------------------------------
 function Test-RebootPending {
     $keys = @(
@@ -214,6 +265,7 @@ function Test-RebootPending {
 # ---------------------------------------------------------------------------
 Initialize-LogDir
 Write-Log '====== Apply-Updates.ps1 started ======'
+Write-EventLogEntry -Message "VulFixes Apply-Updates started on $env:COMPUTERNAME" -EventId 1000
 
 $rebootNeeded = $false
 
@@ -229,6 +281,13 @@ if (-not $SkipWinget) {
     }
 }
 
+# Chocolatey
+if (-not $SkipChocolatey) {
+    if ($PSCmdlet.ShouldProcess($env:COMPUTERNAME, 'Install Chocolatey Updates')) {
+        Install-ChocolateyUpdates
+    }
+}
+
 # Drivers
 if ($IncludeDrivers) {
     if ($PSCmdlet.ShouldProcess($env:COMPUTERNAME, 'Install Driver Updates')) {
@@ -241,6 +300,8 @@ $rebootNeeded = $rebootNeeded -or (Test-RebootPending)
 
 if ($rebootNeeded) {
     Write-Log 'A reboot is required to complete the update installation.' 'WARN'
+    Write-EventLogEntry -Message "VulFixes: updates installed on $env:COMPUTERNAME – reboot required." `
+        -EntryType Warning -EventId 1001
 
     # Persist reboot-required flag for Enforce-Reboot.ps1
     $flagDir = "$env:ProgramData\VulFixes"
@@ -264,3 +325,4 @@ else {
 }
 
 Write-Log '====== Apply-Updates.ps1 finished ======'
+Write-EventLogEntry -Message "VulFixes Apply-Updates finished on $env:COMPUTERNAME." -EventId 1002
